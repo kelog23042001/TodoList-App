@@ -1,6 +1,6 @@
 <?php
 /*
- * Copyright 2015-2017 MongoDB, Inc.
+ * Copyright 2015-present MongoDB, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,10 +19,12 @@ namespace MongoDB;
 
 use Exception;
 use MongoDB\BSON\Serializable;
+use MongoDB\Driver\Exception\RuntimeException as DriverRuntimeException;
 use MongoDB\Driver\Manager;
 use MongoDB\Driver\ReadPreference;
 use MongoDB\Driver\Server;
 use MongoDB\Driver\Session;
+use MongoDB\Driver\WriteConcern;
 use MongoDB\Exception\InvalidArgumentException;
 use MongoDB\Exception\RuntimeException;
 use MongoDB\Operation\WithTransaction;
@@ -40,6 +42,32 @@ use function MongoDB\BSON\fromPHP;
 use function MongoDB\BSON\toPHP;
 use function reset;
 use function substr;
+
+/**
+ * Check whether all servers support executing a write stage on a secondary.
+ *
+ * @internal
+ * @param Server[] $servers
+ */
+function all_servers_support_write_stage_on_secondary(array $servers): bool
+{
+    /* Write stages on secondaries are technically supported by FCV 4.4, but the
+     * CRUD spec requires all 5.0+ servers since FCV is not tracked by SDAM. */
+    static $wireVersionForWriteStageOnSecondary = 13;
+
+    foreach ($servers as $server) {
+        // We can assume that load balancers only front 5.0+ servers
+        if ($server->getType() === Server::TYPE_LOAD_BALANCER) {
+            continue;
+        }
+
+        if (! server_supports_feature($server, $wireVersionForWriteStageOnSecondary)) {
+            return false;
+        }
+    }
+
+    return true;
+}
 
 /**
  * Applies a type map to a document.
@@ -237,6 +265,25 @@ function is_mapreduce_output_inline($out): bool
     reset($out);
 
     return key($out) === 'inline';
+}
+
+/**
+ * Return whether the write concern is acknowledged.
+ *
+ * This function is similar to mongoc_write_concern_is_acknowledged but does not
+ * check the fsync option since that was never supported in the PHP driver.
+ *
+ * @internal
+ * @see https://docs.mongodb.com/manual/reference/write-concern/
+ * @param WriteConcern $writeConcern
+ * @return boolean
+ */
+function is_write_concern_acknowledged(WriteConcern $writeConcern): bool
+{
+    /* Note: -1 corresponds to MONGOC_WRITE_CONCERN_W_ERRORS_IGNORED, which is
+     * deprecated synonym of MONGOC_WRITE_CONCERN_W_UNACKNOWLEDGED and slated
+     * for removal in libmongoc 2.0. */
+    return ($writeConcern->getW() !== 0 && $writeConcern->getW() !== -1) || $writeConcern->getJournal() === true;
 }
 
 /**
@@ -438,4 +485,50 @@ function select_server(Manager $manager, array $options): Server
     }
 
     return $manager->selectServer($readPreference);
+}
+
+/**
+ * Performs server selection for an aggregate operation with a write stage. The
+ * $options parameter may be modified by reference if a primary read preference
+ * must be forced due to the existence of pre-5.0 servers in the topology.
+ *
+ * @internal
+ * @see https://github.com/mongodb/specifications/blob/master/source/crud/crud.rst#aggregation-pipelines-with-write-stages
+ */
+function select_server_for_aggregate_write_stage(Manager $manager, array &$options): Server
+{
+    $readPreference = extract_read_preference_from_options($options);
+
+    /* If there is either no read preference or a primary read preference, there
+     * is no special server selection logic to apply. */
+    if ($readPreference === null || $readPreference->getMode() === ReadPreference::RP_PRIMARY) {
+        return select_server($manager, $options);
+    }
+
+    $server = null;
+    $serverSelectionError = null;
+
+    try {
+        $server = select_server($manager, $options);
+    } catch (DriverRuntimeException $serverSelectionError) {
+    }
+
+    /* If any pre-5.0 servers exist in the topology, force a primary read
+     * preference and repeat server selection if it previously failed or
+     * selected a secondary. */
+    if (! all_servers_support_write_stage_on_secondary($manager->getServers())) {
+        $options['readPreference'] = new ReadPreference(ReadPreference::RP_PRIMARY);
+
+        if ($server === null || $server->isSecondary()) {
+            return select_server($manager, $options);
+        }
+    }
+
+    /* If the topology only contains 5.0+ servers, we should either return the
+     * previously selected server or propagate the server selection error. */
+    if ($serverSelectionError !== null) {
+        throw $serverSelectionError;
+    }
+
+    return $server;
 }

@@ -1,6 +1,6 @@
 <?php
 /*
- * Copyright 2017 MongoDB, Inc.
+ * Copyright 2017-present MongoDB, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -131,8 +131,6 @@ class Watch implements Executable, /* @internal */ CommandSubscriber
      *    mutually exclusive.
      *
      *  * session (MongoDB\Driver\Session): Client session.
-     *
-     *    Sessions are not supported for server versions < 3.6.
      *
      *  * startAfter (document): Specifies the logical starting point for the
      *    new change stream. Unlike "resumeAfter", this option can be used with

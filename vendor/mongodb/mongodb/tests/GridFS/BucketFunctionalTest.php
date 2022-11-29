@@ -9,13 +9,12 @@ use MongoDB\Driver\ReadPreference;
 use MongoDB\Driver\WriteConcern;
 use MongoDB\Exception\InvalidArgumentException;
 use MongoDB\GridFS\Bucket;
+use MongoDB\GridFS\Exception\CorruptFileException;
 use MongoDB\GridFS\Exception\FileNotFoundException;
 use MongoDB\GridFS\Exception\StreamException;
 use MongoDB\Model\BSONDocument;
 use MongoDB\Model\IndexInfo;
-use MongoDB\Operation\ListCollections;
 use MongoDB\Operation\ListIndexes;
-use PHPUnit\Framework\Error\Warning;
 
 use function array_merge;
 use function call_user_func;
@@ -175,7 +174,8 @@ class BucketFunctionalTest extends FunctionalTestCase
 
         $this->chunksCollection->deleteOne(['files_id' => $id, 'n' => 0]);
 
-        $this->expectException(Warning::class);
+        $this->expectException(CorruptFileException::class);
+        $this->expectExceptionMessage('Chunk not found for index "0"');
         stream_get_contents($this->bucket->openDownloadStream($id));
     }
 
@@ -188,7 +188,8 @@ class BucketFunctionalTest extends FunctionalTestCase
             ['$set' => ['n' => 1]]
         );
 
-        $this->expectException(Warning::class);
+        $this->expectException(CorruptFileException::class);
+        $this->expectExceptionMessage('Expected chunk to have index "0" but found "1"');
         stream_get_contents($this->bucket->openDownloadStream($id));
     }
 
@@ -201,7 +202,8 @@ class BucketFunctionalTest extends FunctionalTestCase
             ['$set' => ['data' => new Binary('fooba', Binary::TYPE_GENERIC)]]
         );
 
-        $this->expectException(Warning::class);
+        $this->expectException(CorruptFileException::class);
+        $this->expectExceptionMessage('Expected chunk to have size "6" but found "5"');
         stream_get_contents($this->bucket->openDownloadStream($id));
     }
 
@@ -771,29 +773,6 @@ CMD;
         $output = implode(PHP_EOL, $output);
 
         $this->assertSame('', $output);
-    }
-
-    /**
-     * Asserts that a collection with the given name does not exist on the
-     * server.
-     *
-     * @param string $collectionName
-     */
-    private function assertCollectionDoesNotExist(string $collectionName): void
-    {
-        $operation = new ListCollections($this->getDatabaseName());
-        $collections = $operation->execute($this->getPrimaryServer());
-
-        $foundCollection = null;
-
-        foreach ($collections as $collection) {
-            if ($collection->getName() === $collectionName) {
-                $foundCollection = $collection;
-                break;
-            }
-        }
-
-        $this->assertNull($foundCollection, sprintf('Collection %s exists', $collectionName));
     }
 
     /**
